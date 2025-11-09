@@ -24,13 +24,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md(
-        """
-    # Forecast Tool
-
-    Upload your time series data and generate a simple forecast using moving average or linear regression. Select your forecast method and horizon below.
-    """
-    )
+    mo.md("""# Forecast Tool""")
     return
 
 
@@ -475,6 +469,8 @@ def _(
         plt.tight_layout()
         plt.show()
 
+        return fig
+
     return simulate, simulation_plots
 
 
@@ -506,9 +502,10 @@ def _(
 ):
     # Display parameters and their current values
     mo.vstack([
-        slider_gamma_max,
-        slider_gamma_min,
-        slider_sigma,
+        mo.hstack([
+            mo.vstack([slider_gamma_max, slider_gamma_min, slider_sigma]),
+            mo.vstack([slider_gamma_max.value, slider_gamma_min.value, slider_sigma.value])
+                ]),
         radio_horizon,
         simulation_plots()
     ])
@@ -516,15 +513,43 @@ def _(
 
 
 @app.cell
-def _(df, np, params, simulate):
-    def risk_admissibility(P_paths, params):
+def _(mo):
+    mo.md(r"""# Risk Assessment""")
+    return
+
+
+@app.cell
+def _(
+    df,
+    mo,
+    np,
+    params,
+    simulate,
+    slider_Phigh,
+    slider_Plow,
+    slider_Teps,
+    slider_Tstar,
+    slider_Ttail,
+):
+    def risk_admissibility():
+        exog_cols = ["btc_price_usd", "eth_price_usd", "fear-greed-index"]
+        parameters = params()
+
+        '''parameters['Plow'] = 
+        parameters['Phigh'] = 
+        parameters['T_star'] = 
+        parameters['Ttail'] = 
+        parameters['eps_tail'] = '''
+    
+        P_paths, I_paths, X_paths, X_test, y_test = simulate(df, 'logit', exog_cols, parameters)
+    
         P = P_paths
-        H = params['horizon_days']
-        Plow = params['Plow']
-        Phigh = params['Phigh']
-        T_star = params['T_star']
-        Ttail = params['Ttail']
-        eps_tail = params['eps_tail']
+        H = parameters['horizon_days']
+        Plow = slider_Plow.value
+        Phigh = slider_Phigh.value
+        T_star = slider_Tstar.value
+        Ttail = slider_Ttail.value
+        eps_tail = slider_Teps.value
 
         # compute time outside D0 for each sim (count of days where P not in [Plow,Phigh])
         outside = ((P < Plow) | (P > Phigh)).sum(axis=1) # includes t=0..H
@@ -544,22 +569,53 @@ def _(df, np, params, simulate):
         # human readable summary
         print(f"Expected days outside D0 over {H} days: {expected_outside:.2f} (threshold T*={T_star})")
         print(f"Probability time-outside > {Ttail}: {prob_exceed_tail:.3f} (allowed eps={eps_tail})")
-        print('RISK-ADMISSIBLE POLICY:' , 'YES' if admissible else 'NO')
+        print('RISK-ADMISSIBLE:' , '✅ YES' if admissible else '❌ NO')
 
-        return result
+        #return result
+        return mo.vstack([mo.md(f"Expected days outside D0 over {H} days: {expected_outside:.2f} (threshold T*={T_star})"),
+                          mo.md(f"Probability time-outside > {Ttail}: {prob_exceed_tail:.3f} (allowed eps={eps_tail})"),
+                          mo.md(f"RISK-ADMISSIBLE: {'✅ YES' if admissible else '❌ NO'}")
+                         ])
 
-    exog_cols = ["btc_price_usd", "eth_price_usd", "fear-greed-index"]
-    parameters = params()
+    #result_risk = risk_admissibility(P_paths, parameters)
 
-    P_paths, I_paths, X_paths = simulate(df, 'logit', exog_cols, parameters)
-
-    result_risk = risk_admissibility(P_paths, parameters)
-
-    return P_paths, parameters, result_risk
+    return (risk_admissibility,)
 
 
 @app.cell
-def _(P_paths, np, parameters, params, plt, result_risk):
+def _(mo):
+    # UI for risk admissibility parameters
+    slider_Plow = mo.ui.slider(start=0.0, stop=0.5, step=0.01, value=0.4, label="P_low")
+    slider_Phigh = mo.ui.slider(start=0.5, stop=1.0, step=0.01, value=0.6, label="P_high")
+    slider_Tstar = mo.ui.slider(start=1, stop=100, step=1, value=10, label="T_star")
+    slider_Ttail = mo.ui.slider(start=1, stop=100, step=1, value=20, label="T_tail")
+    slider_Teps = mo.ui.slider(start=0.01, stop=0.3, step=0.01, value=0.05, label="T_eps")
+    return slider_Phigh, slider_Plow, slider_Teps, slider_Tstar, slider_Ttail
+
+
+@app.cell
+def _(
+    mo,
+    risk_admissibility,
+    slider_Phigh,
+    slider_Plow,
+    slider_Teps,
+    slider_Tstar,
+    slider_Ttail,
+):
+    mo.vstack([
+        mo.md("### Risk-Admissibility Parameters"),
+        mo.hstack([mo.vstack([slider_Plow, slider_Phigh, slider_Tstar, slider_Ttail, slider_Teps]), 
+                  mo.vstack([mo.md(f"P_low: **{slider_Plow.value}**"), mo.md(f"P_high: **{slider_Phigh.value}**"), mo.md(f"T_star: **{slider_Tstar.value}**"), mo.md(f"T_tail: **{slider_Ttail.value}**"), mo.md(f"eps_Tail: **{slider_Teps.value}**")]) ]),
+        risk_admissibility()
+    ])
+
+
+    return
+
+
+@app.cell
+def _(np, params, plt):
     def diagnostics(dates, P_paths, risk_admissibility):
         q10 = risk_admissibility['q10']
         q50 = risk_admissibility['q50']
@@ -592,8 +648,8 @@ def _(P_paths, np, parameters, params, plt, result_risk):
         print(f"Median path start P: {float(P[:,0].mean()):.3f}")
         print(f"Median P after horizon: {float(np.median(P[:,-1])):.3f}")
 
-    dates = np.arange(parameters['horizon_days'] + 1)
-    result_diagnostics = diagnostics(dates, P_paths, result_risk)
+    #dates = np.arange(parameters['horizon_days'] + 1)
+    #result_diagnostics = diagnostics(dates, P_paths, result_risk)
     return
 
 
