@@ -29,13 +29,13 @@ def _(mo):
 
 
 @app.cell
-def _(pd):
+def _(mo, pd):
     def params():
         # Policy / simulation params
-        sigma = 0.02 # inflation change step per round
+        sigma = 0.0000005 # inflation change step per round
         P_star = 0.5 # target participation rate P^*
-        gamma_min = 0.01 # gamma_-
-        gamma_max = 0.30 # gamma_+
+        gamma_min = 0.0001 # lower bound of inflation per round
+        gamma_max = 0.01 # upper bound of inflation per round
 
         # Simulation
         horizon_days = 180
@@ -50,6 +50,8 @@ def _(pd):
         T_star = 10 # expected number of days outside D0 allowed over horizon
         Ttail = 20 # tail threshold: unacceptable if time-outside > Ttail
         eps_tail = 0.05 # allowed probability of exceeding Ttail across sims
+        gamma_star = 0.25 # target emission rate
+        yield_star = 0.4 # target yield rate
     
         return dict(sigma=sigma, P_star=P_star, gamma_min=gamma_min, gamma_max=gamma_max,
                     horizon_days=horizon_days, n_sims=n_sims,
@@ -64,11 +66,16 @@ def _(pd):
     df_raw = pd.read_csv(path)
 
     df_raw["date"] = pd.to_datetime(df_raw["date"], errors="coerce")
+
+    # Fix the inflation calculation:
+    df_raw["inflation_per_round"] = df_raw["inflation"]/1e9  # inflation per round
+    df_raw["annual_inflation_rate"] = (1 + df_raw["inflation_per_round"]) ** 417 - 1 # annualized issuance rate
+
     df = df_raw.dropna(subset=["date"]).set_index("date").sort_index()
 
     # Identify key columns
     p_col = "participation-rate"
-    g_col = "issuance-rate"
+    g_col = "annual_inflation_rate"
 
     # Convert numerics
     for c in df.columns:
@@ -76,7 +83,7 @@ def _(pd):
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df = df.dropna(subset=[p_col, g_col])
-    #mo.ui.data_explorer(df)
+    mo.ui.data_explorer(df)
 
     return df, params
 
@@ -100,7 +107,7 @@ def _(df, mo, np, pd, plt):
         df2['fear-greed-index'] = df2['fear-greed-index'].fillna(df2['fear-greed-index'].mean())
     
         df2.rename(columns={'participation-rate': 'P'}, inplace=True)
-        df2.rename(columns={'issuance-rate': 'I'}, inplace=True)
+        df2.rename(columns={'annual_inflation_rate': 'I'}, inplace=True)
         df2['Y'] = np.log(df2['P']/(1-df2['P']))
         df2['logP'] = np.log(df2['P'])
         # target y = Y_{t+1}
@@ -252,13 +259,16 @@ def _(
     date_picker,
     df,
     fit_ridge,
+    mo,
     np,
     params,
     plt,
     prepare_data,
     radio_horizon,
+    radio_sampling,
     slider_gamma_max,
     slider_gamma_min,
+    slider_sigma,
 ):
     def sample_exog(series, n_paths, horizon, method="bootstrap", block_size=None, random_state=None):
         """
@@ -357,8 +367,12 @@ def _(
 
         # For exogenous regressors we'll bootstrap (with replacement) historical rows
         X_future = np.zeros((n, H, len(exog_variables)))
-        for i, c in enumerate(exog_variables):
-            X_future[:, :, i] = sample_exog(X[c], n, H, method='bootstrap', block_size=7, random_state=42)
+        if radio_sampling.value == 'bootstrap':
+            for i, c in enumerate(exog_variables):
+                X_future[:, :, i] = sample_exog(X[c], n, H, method='bootstrap', block_size=7, random_state=42)
+        else:
+            for i, c in enumerate(exog_variables):
+                X_future[:, :, i] = sample_exog(X[c], n, H, method='ar1', block_size=7, random_state=42)
 
 
         # storage
@@ -406,7 +420,10 @@ def _(
 
             # apply protocol policy to update gamma: gamma_{t+1} = clip(gamma_t + sigma * sign(P_star - P_t), [gamma_min, gamma_max])
             control = sigma * np.sign(P_star - P_curr)
-            I_next = np.clip(I_t + control, gamma_min, gamma_max)
+            I_t_per_round = (I_t + 1) ** (1/417) - 1
+            I_next_per_round = np.clip(I_t_per_round + control, gamma_min, gamma_max)
+            I_next = (1 + I_next_per_round) ** 417 - 1 # adjusted annualized issuance rate
+            #I_next = np.clip(I_t + control, gamma_min, gamma_max)
 
             P_paths[:,t+1] = Y_next
             I_paths[:,t+1] = I_next
@@ -418,7 +435,7 @@ def _(
             P_paths = np.exp(P_paths)
             y_test = np.exp(y_test)
     
-        return P_paths, I_paths, X_future, X_test, y_test
+        return P_paths, I_paths, X_future, X_test, y_test, coef
 
 
     def simulation_plots():
@@ -428,9 +445,10 @@ def _(
         # Adjusted Parameters:
         parameters['gamma_max'] = slider_gamma_max.value
         parameters['gamma_min'] = slider_gamma_min.value
+        parameters['sigma'] = slider_sigma.value * 1e-9   # adjust to the correct value (ppb)
         parameters['horizon_days'] = int(radio_horizon.value)
     
-        P_paths, I_paths, X_paths, X_test, y_test = simulate(df, 'logit', exog_cols, parameters)
+        P_paths, I_paths, X_paths, X_test, y_test, optimal_beta = simulate(df, 'logit', exog_cols, parameters)
     
         # Create subplots with shared x-axis
         fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(8, 6))
@@ -469,7 +487,7 @@ def _(
         plt.tight_layout()
         plt.show()
 
-        return fig
+        return mo.vstack([mo.md(f"$\\hat{{\\beta}}$: {optimal_beta}"), fig ])
 
     return simulate, simulation_plots
 
@@ -478,23 +496,35 @@ def _(
 def _(mo):
 
     # Create sliders for different parameters
-    slider_gamma_max = mo.ui.slider(start=0, stop=0.95, step=0.02, value=0.3, label="Issuance Max")
-    slider_gamma_min = mo.ui.slider(start=0, stop=0.2, step=0.01, value=0.02, label="Issuance Min")
-    slider_sigma = mo.ui.slider(start=0.01, stop=0.1, step=0.01, value=0.02, label="Inflation Change")
+    slider_gamma_max = mo.ui.slider(start=0.00001, stop=0.002, step=0.00002, value=0.0007, label="Issuance Max")
+    slider_gamma_min = mo.ui.slider(start=0.000001, stop=0.001, step=0.00002, value=0.0006, label="Issuance Min")
+    slider_sigma = mo.ui.slider(start=100, stop=10000, step=200, value=500, label="Inflation Change (ppb)")
     radio_horizon = mo.ui.radio(
         options=['30', '90', '180'],
         value='180',  # default selection
         label="Horizon Days"
     )
+    radio_sampling = mo.ui.radio(
+        options=['bootstrap', 'AR1'],
+        value='bootstrap',  # default selection
+        label="Sampling of Exogeneous Variables"
+    )
 
 
-    return radio_horizon, slider_gamma_max, slider_gamma_min, slider_sigma
+    return (
+        radio_horizon,
+        radio_sampling,
+        slider_gamma_max,
+        slider_gamma_min,
+        slider_sigma,
+    )
 
 
 @app.cell
 def _(
     mo,
     radio_horizon,
+    radio_sampling,
     simulation_plots,
     slider_gamma_max,
     slider_gamma_min,
@@ -506,7 +536,9 @@ def _(
             mo.vstack([slider_gamma_max, slider_gamma_min, slider_sigma]),
             mo.vstack([slider_gamma_max.value, slider_gamma_min.value, slider_sigma.value])
                 ]),
-        radio_horizon,
+        mo.hstack([
+            radio_horizon, radio_sampling 
+                ]),
         simulation_plots()
     ])
     return
@@ -524,24 +556,30 @@ def _(
     mo,
     np,
     params,
+    radio_horizon,
     simulate,
     slider_Phigh,
     slider_Plow,
     slider_Teps,
     slider_Tstar,
     slider_Ttail,
+    slider_gamma_max,
+    slider_gamma_min,
+    slider_gamma_star,
+    slider_sigma,
+    slider_yield_star,
 ):
     def risk_admissibility():
         exog_cols = ["btc_price_usd", "eth_price_usd", "fear-greed-index"]
         parameters = params()
 
-        '''parameters['Plow'] = 
-        parameters['Phigh'] = 
-        parameters['T_star'] = 
-        parameters['Ttail'] = 
-        parameters['eps_tail'] = '''
+        # Adjusted Parameters:
+        parameters['gamma_max'] = slider_gamma_max.value
+        parameters['gamma_min'] = slider_gamma_min.value
+        parameters['sigma'] = slider_sigma.value
+        parameters['horizon_days'] = int(radio_horizon.value)
     
-        P_paths, I_paths, X_paths, X_test, y_test = simulate(df, 'logit', exog_cols, parameters)
+        P_paths, I_paths, X_paths, X_test, y_test, optimal_beta = simulate(df, 'logit', exog_cols, parameters)
     
         P = P_paths
         H = parameters['horizon_days']
@@ -550,6 +588,8 @@ def _(
         T_star = slider_Tstar.value
         Ttail = slider_Ttail.value
         eps_tail = slider_Teps.value
+        gamma_star = slider_gamma_star.value
+        yield_star = slider_yield_star.value
 
         # compute time outside D0 for each sim (count of days where P not in [Plow,Phigh])
         outside = ((P < Plow) | (P > Phigh)).sum(axis=1) # includes t=0..H
@@ -558,6 +598,13 @@ def _(
         prob_exceed_tail = float((outside > Ttail).mean())
 
         admissible = (expected_outside <= T_star) and (prob_exceed_tail <= eps_tail)
+
+        # Emission and Yield Rate target acceptance
+        ET = I_paths[:,-1].mean()
+        YT = I_paths/P_paths
+        YT = YT[:,-1].mean()
+
+        admissible = (admissible) and (ET <= gamma_star) and (YT <= yield_star)
 
         # also compute percentiles for plotting
         q10 = np.percentile(P, 10, axis=0)
@@ -569,15 +616,19 @@ def _(
         # human readable summary
         print(f"Expected days outside D0 over {H} days: {expected_outside:.2f} (threshold T*={T_star})")
         print(f"Probability time-outside > {Ttail}: {prob_exceed_tail:.3f} (allowed eps={eps_tail})")
+        print(f"Emission rate: {ET:.3f} (acceptance target={gamma_star})")
+        print(f"Yield: {YT:.3f} (acceptance target={yield_star})")
         print('RISK-ADMISSIBLE:' , '✅ YES' if admissible else '❌ NO')
 
         #return result
         return mo.vstack([mo.md(f"Expected days outside D0 over {H} days: {expected_outside:.2f} (threshold T*={T_star})"),
                           mo.md(f"Probability time-outside > {Ttail}: {prob_exceed_tail:.3f} (allowed eps={eps_tail})"),
+                          mo.md(f"Emission rate: {ET:.3f} (acceptance target={gamma_star})"),
+                          mo.md(f"Yield: {YT:.3f} (acceptance target={yield_star})"),
                           mo.md(f"RISK-ADMISSIBLE: {'✅ YES' if admissible else '❌ NO'}")
                          ])
 
-    #result_risk = risk_admissibility(P_paths, parameters)
+    #result_risk = risk_admissibility()
 
     return (risk_admissibility,)
 
@@ -590,7 +641,17 @@ def _(mo):
     slider_Tstar = mo.ui.slider(start=1, stop=100, step=1, value=10, label="T_star")
     slider_Ttail = mo.ui.slider(start=1, stop=100, step=1, value=20, label="T_tail")
     slider_Teps = mo.ui.slider(start=0.01, stop=0.3, step=0.01, value=0.05, label="T_eps")
-    return slider_Phigh, slider_Plow, slider_Teps, slider_Tstar, slider_Ttail
+    slider_gamma_star = mo.ui.slider(start=0.05, stop=1.0, step=0.01, value=0.25, label="gamma_star")
+    slider_yield_star = mo.ui.slider(start=0.1, stop=1.0, step=0.01, value=0.4, label="yield")
+    return (
+        slider_Phigh,
+        slider_Plow,
+        slider_Teps,
+        slider_Tstar,
+        slider_Ttail,
+        slider_gamma_star,
+        slider_yield_star,
+    )
 
 
 @app.cell
@@ -602,11 +663,13 @@ def _(
     slider_Teps,
     slider_Tstar,
     slider_Ttail,
+    slider_gamma_star,
+    slider_yield_star,
 ):
     mo.vstack([
         mo.md("### Risk-Admissibility Parameters"),
-        mo.hstack([mo.vstack([slider_Plow, slider_Phigh, slider_Tstar, slider_Ttail, slider_Teps]), 
-                  mo.vstack([mo.md(f"P_low: **{slider_Plow.value}**"), mo.md(f"P_high: **{slider_Phigh.value}**"), mo.md(f"T_star: **{slider_Tstar.value}**"), mo.md(f"T_tail: **{slider_Ttail.value}**"), mo.md(f"eps_Tail: **{slider_Teps.value}**")]) ]),
+        mo.hstack([mo.vstack([slider_Plow, slider_Phigh, slider_Tstar, slider_Ttail, slider_Teps, slider_gamma_star, slider_yield_star]), 
+                  mo.vstack([mo.md(f"P_low: **{slider_Plow.value}**"), mo.md(f"P_high: **{slider_Phigh.value}**"), mo.md(f"T_star: **{slider_Tstar.value}**"), mo.md(f"T_tail: **{slider_Ttail.value}**"), mo.md(f"eps_Tail: **{slider_Teps.value}**"), mo.md(f"gamma_star: **{slider_gamma_star.value}**"), mo.md(f"yield_star: **{slider_yield_star.value}**")]) ]),
         risk_admissibility()
     ])
 
