@@ -265,6 +265,7 @@ def _(
     plt,
     prepare_data,
     radio_horizon,
+    radio_paths,
     radio_sampling,
     slider_gamma_max,
     slider_gamma_min,
@@ -446,6 +447,7 @@ def _(
         parameters['gamma_max'] = slider_gamma_max.value
         parameters['gamma_min'] = slider_gamma_min.value
         parameters['sigma'] = slider_sigma.value * 1e-9   # adjust to the correct value (ppb)
+        parameters['n_sims'] = int(radio_paths.value)
         parameters['horizon_days'] = int(radio_horizon.value)
     
         P_paths, I_paths, X_paths, X_test, y_test, optimal_beta = simulate(df, 'logit', exog_cols, parameters)
@@ -499,6 +501,11 @@ def _(mo):
     slider_gamma_max = mo.ui.slider(start=0.00001, stop=0.002, step=0.00002, value=0.0007, label="Issuance Max")
     slider_gamma_min = mo.ui.slider(start=0.000001, stop=0.001, step=0.00002, value=0.0006, label="Issuance Min")
     slider_sigma = mo.ui.slider(start=100, stop=10000, step=200, value=500, label="Inflation Change (ppb)")
+    radio_paths = mo.ui.radio(
+        options=['5', '20', '200', '1000'],
+        value='20',  # default selection
+        label="Number of simulations"
+    )
     radio_horizon = mo.ui.radio(
         options=['30', '90', '180'],
         value='180',  # default selection
@@ -513,6 +520,7 @@ def _(mo):
 
     return (
         radio_horizon,
+        radio_paths,
         radio_sampling,
         slider_gamma_max,
         slider_gamma_min,
@@ -524,6 +532,7 @@ def _(mo):
 def _(
     mo,
     radio_horizon,
+    radio_paths,
     radio_sampling,
     simulation_plots,
     slider_gamma_max,
@@ -537,7 +546,7 @@ def _(
             mo.vstack([slider_gamma_max.value, slider_gamma_min.value, slider_sigma.value])
                 ]),
         mo.hstack([
-            radio_horizon, radio_sampling 
+            radio_paths, radio_horizon, radio_sampling 
                 ]),
         simulation_plots()
     ])
@@ -557,6 +566,7 @@ def _(
     np,
     params,
     radio_horizon,
+    radio_paths,
     simulate,
     slider_Phigh,
     slider_Plow,
@@ -577,6 +587,7 @@ def _(
         parameters['gamma_max'] = slider_gamma_max.value
         parameters['gamma_min'] = slider_gamma_min.value
         parameters['sigma'] = slider_sigma.value
+        parameters['n_sims'] = int(radio_paths.value)
         parameters['horizon_days'] = int(radio_horizon.value)
     
         P_paths, I_paths, X_paths, X_test, y_test, optimal_beta = simulate(df, 'logit', exog_cols, parameters)
